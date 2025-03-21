@@ -37,8 +37,8 @@ type UserInfo struct {
 
 // Amount represents the amount and currency.
 type Amount struct {
-	Value    string `json:"value"`
-	Currency string `json:"currency"`
+	Value    string `json:"value,omitempty"`
+	Currency string `json:"currency,omitempty"`
 }
 
 type AccountInfo struct {

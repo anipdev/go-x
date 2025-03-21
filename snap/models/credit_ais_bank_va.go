@@ -123,7 +123,7 @@ type (
 		BillDetails           []BillDetail `json:"billDetails"`
 		FreeTexts             []Lang       `json:"freeTexts"`
 		VirtualAccountTrxType string       `json:"virtualAccountTrxType"`
-		FeeAmount             Amount       `json:"feeAmount"`
+		FeeAmount             *Amount      `json:"feeAmount"`
 		ExpiredDate           string       `json:"expiredDate"`
 		AdditionalInfo        T            `json:"additionalInfo"`
 	}

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -33,6 +35,7 @@ type (
 
 	Client interface {
 		PrepareSignAsymmetric(ctx context.Context, req *http.Request) (err error)
+		PrepareSignSymmetric(ctx context.Context, req *http.Request) (err error)
 		PrepareSignAuth(ctx context.Context, req *http.Request) (err error)
 		PrepareHTTPRequest(ctx context.Context, req *http.Request) (err error)
 	}
@@ -52,10 +55,22 @@ func NewClient(opt *ClientOption) Client {
 	}
 }
 
-func (dep *client) exportPEMStrToPrivKey(priv []byte) *rsa.PrivateKey {
+func (dep *client) exportPEMStrToPrivKey(priv []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(priv)
-	key, _ := x509.ParsePKCS1PrivateKey(block.Bytes)
-	return key
+	if block == nil {
+		return nil, errors.New("failed to decode PEM block containing private key")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	parsed, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("private key is invalid")
+	}
+
+	return parsed, err
 }
 
 func (dep *client) generateRSAPrivateKey(ctx context.Context, key string) (privKey *rsa.PrivateKey, err error) {
@@ -63,22 +78,21 @@ func (dep *client) generateRSAPrivateKey(ctx context.Context, key string) (privK
 	if err != nil {
 		return privKey, errors.New("decode failed")
 	}
-	privKey = dep.exportPEMStrToPrivKey(decodePrivKey)
+	privKey, err = dep.exportPEMStrToPrivKey(decodePrivKey)
 	return
 }
 
 // generateSign is a helper function to handle common signature generation logic
 func (dep *client) generateSign(ctx context.Context, message string) (signatureStr string, err error) {
-	msgHAsh := sha256.Sum256([]byte(message))
-
 	privKeyFile, err := dep.generateRSAPrivateKey(ctx, dep.PrivateKey)
 	if err != nil {
 		return
 	}
 
-	signature, err := rsa.SignPSS(rand.Reader, privKeyFile, crypto.SHA256, msgHAsh[:], nil)
+	hashed := sha256.Sum256([]byte(message))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privKeyFile, crypto.SHA256, hashed[:])
 	if err != nil {
-		return
+		return "", err
 	}
 
 	signatureStr = base64.StdEncoding.EncodeToString(signature)
@@ -141,10 +155,53 @@ func (dep *client) PrepareHTTPRequest(ctx context.Context, req *http.Request) (e
 	req.Header.Set(X_IDEMPOTENCY, uuid.NewString())
 
 	//prepare signature
-	err = dep.PrepareSignAsymmetric(ctx, req)
+	err = dep.PrepareSignSymmetric(ctx, req)
 	if err != nil {
 		return
 	}
+
+	return
+}
+
+// PrepareSignSymmetric implements Client.
+func (dep *client) PrepareSignSymmetric(ctx context.Context, req *http.Request) (err error) {
+	var body string
+	if req.Body != nil {
+		var bodyBytes []byte
+		bodyBytes, _ = io.ReadAll(req.Body)
+		// write back to request body
+		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		//unpretty request json
+		dst := &bytes.Buffer{}
+		_ = json.Compact(dst, []byte(bodyBytes))
+		if dst != nil {
+			body = dst.String()
+		}
+	}
+
+	token := req.Header.Get(X_AUTHORIZATION)
+	if token == "" {
+		return errors.New("token is empty")
+	}
+
+	token = strings.Replace(token, "Bearer ", "", 1)
+
+	// msg := sha256.Sum256([]byte(body))
+	// sha256_hash := hex.EncodeToString(msg[:])
+	// stringToSign := strings.ToLower(sha256_hash)
+
+	hash := sha256.New()
+	hash.Write([]byte(body))
+	lowercaseHexHash := strings.ToLower(hex.EncodeToString(hash.Sum(nil)))
+
+	message := fmt.Sprintf("%s:%s:%s:%s:%s", req.Method, req.URL.Path, token, lowercaseHexHash, req.Header.Get(X_TIMESTAMP))
+
+	hmac := hmac.New(sha512.New, []byte(dep.Secret))
+	hmac.Write([]byte(message))
+	signature := base64.StdEncoding.EncodeToString(hmac.Sum(nil))
+
+	// Put signature to header
+	req.Header.Set(X_SIGNATURE, signature)
 
 	return
 }

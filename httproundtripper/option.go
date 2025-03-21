@@ -1,4 +1,4 @@
-package http_round_tripper
+package httproundtripper
 
 type Option struct {
 	service string
